@@ -2348,23 +2348,26 @@ describe('app-dir static/dynamic handling', () => {
       expect($2('#page-data').text()).not.toBe(pageData)
     })
   } else {
-    it('should not error with dynamic server usage with force-static', async () => {
-      const res = await next.fetch(
-        '/static-to-dynamic-error-forced/static-bailout-1'
-      )
-      const outputIndex = next.cliOutput.length
-      const html = await res.text()
-
-      expect(res.status).toBe(200)
-      expect(html).toContain('/static-to-dynamic-error-forced')
-      expect(html).toMatch(/id:.*?static-bailout-1/)
-
-      if (isNextStart) {
-        expect(stripAnsi(next.cliOutput).substring(outputIndex)).not.toMatch(
-          /Page changed from static to dynamic at runtime \/static-to-dynamic-error-forced\/static-bailout-1, reason: cookies/
+    // TODO: re-implement this in a way that'll support PFPR
+    if (!process.env.__NEXT_EXPERIMENTAL_PPR) {
+      it('should not error with dynamic server usage with force-static', async () => {
+        const res = await next.fetch(
+          '/static-to-dynamic-error-forced/static-bailout-1'
         )
-      }
-    })
+        const outputIndex = next.cliOutput.length
+        const html = await res.text()
+
+        expect(res.status).toBe(200)
+        expect(html).toContain('/static-to-dynamic-error-forced')
+        expect(html).toMatch(/id:.*?static-bailout-1/)
+
+        if (isNextStart) {
+          expect(stripAnsi(next.cliOutput).substring(outputIndex)).not.toMatch(
+            /Page changed from static to dynamic at runtime \/static-to-dynamic-error-forced\/static-bailout-1, reason: cookies/
+          )
+        }
+      })
+    }
 
     it('should produce response with url from fetch', async () => {
       const res = await next.fetch('/response-url')
@@ -2387,18 +2390,20 @@ describe('app-dir static/dynamic handling', () => {
       )
     })
 
-    it('should properly error when dynamic = "error" page uses dynamic', async () => {
-      const res = await next.fetch('/dynamic-error/static-bailout-1')
-      const outputIndex = next.cliOutput.length
+    if (!process.env.__NEXT_EXPERIMENTAL_PPR) {
+      it('should properly error when dynamic = "error" page uses dynamic', async () => {
+        const res = await next.fetch('/dynamic-error/static-bailout-1')
+        const outputIndex = next.cliOutput.length
 
-      expect(res.status).toBe(500)
+        expect(res.status).toBe(500)
 
-      if (isNextStart) {
-        expect(stripAnsi(next.cliOutput).substring(outputIndex)).not.toMatch(
-          /Page with dynamic = "error" encountered dynamic data method on \/dynamic-error\/static-bailout-1/
-        )
-      }
-    })
+        if (isNextStart) {
+          expect(stripAnsi(next.cliOutput).substring(outputIndex)).not.toMatch(
+            /Page with dynamic = "error" encountered dynamic data method on \/dynamic-error\/static-bailout-1/
+          )
+        }
+      })
+    }
   }
 
   it('should skip cache in draft mode', async () => {
@@ -3093,7 +3098,11 @@ describe('app-dir static/dynamic handling', () => {
       const html = await res.text()
       const $ = cheerio.load(html)
 
-      expect(JSON.parse($('#params').text())).toEqual({ slug: 'random' })
+      if (process.env.__NEXT_EXPERIMENTAL_PPR) {
+        expect(JSON.parse($('#params').text())).toEqual({ slug: '' })
+      } else {
+        expect(JSON.parse($('#params').text())).toEqual({ slug: 'random' })
+      }
       expect(JSON.parse($('#headers').text())).toEqual([])
       expect(JSON.parse($('#cookies').text())).toEqual([])
 

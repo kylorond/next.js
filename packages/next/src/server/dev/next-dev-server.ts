@@ -758,6 +758,7 @@ export default class DevServer extends Server {
           distDir: this.distDir,
           pathname,
           config: {
+            pprConfig: this.nextConfig.experimental.ppr,
             configFileName,
             publicRuntimeConfig,
             serverRuntimeConfig,

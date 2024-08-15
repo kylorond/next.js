@@ -19,7 +19,11 @@ import { getTracer } from '../lib/trace/tracer'
 import { NextNodeServerSpan } from '../lib/trace/constants'
 import { StaticGenBailoutError } from '../../client/components/static-generation-bailout'
 import type { LoadingModuleData } from '../../shared/lib/app-router-context.shared-runtime'
-import type { Params } from '../../client/components/params'
+import {
+  areUnknownRouteParamsKnown,
+  type Params,
+} from '../../client/components/params'
+import { isFallbackDynamicParamTypeShort } from './fallbacks'
 
 /**
  * Use the provided loader tree to create the React Component tree.
@@ -95,9 +99,11 @@ async function createComponentTreeInternal({
       ClientPageRoot,
       createUntrackedSearchParams,
       createDynamicallyTrackedSearchParams,
+      createDynamicallyTrackedParams,
       serverHooks: { DynamicServerError },
       Postpone,
     },
+    staticGenerationStore: { unknownRouteParams },
     pagePath,
     getDynamicParamFromSegment,
     isPrefetch,
@@ -340,18 +346,24 @@ async function createComponentTreeInternal({
 
   // Handle dynamic segment params.
   const segmentParam = getDynamicParamFromSegment(segment)
-  /**
-   * Create object holding the parent params and current params
-   */
+
+  // Create object holding the parent params and current params
   const currentParams =
     // Handle null case where dynamic param is optional
     segmentParam && segmentParam.value !== null
       ? {
           ...parentParams,
-          [segmentParam.param]: segmentParam.value,
+          [segmentParam.param]:
+            isFallbackDynamicParamTypeShort(segmentParam.type) &&
+            // If the unknown params is a map, we can use the map to get the
+            // value.
+            areUnknownRouteParamsKnown(unknownRouteParams)
+              ? unknownRouteParams.get(segmentParam.param)
+              : segmentParam.value,
         }
       : // Pass through parent params to children
         parentParams
+
   // Resolve the segment param
   const actualSegment = segmentParam ? segmentParam.treeSegment : segment
 
@@ -599,6 +611,7 @@ async function createComponentTreeInternal({
       // If we are passing searchParams to a server component Page we need to track their usage in case
       // the current render mode tracks dynamic API usage.
       props.searchParams = createDynamicallyTrackedSearchParams(query)
+      props.params = createDynamicallyTrackedParams(props.params)
       segmentElement = (
         <>
           <MetadataOutlet getReady={getMetadataReady} />
@@ -608,6 +621,8 @@ async function createComponentTreeInternal({
       )
     }
   } else {
+    props.params = createDynamicallyTrackedParams(props.params)
+
     // For layouts we just render the component
     segmentElement = (
       <>

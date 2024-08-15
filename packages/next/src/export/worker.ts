@@ -86,6 +86,9 @@ async function exportPageImpl(
   const {
     page,
 
+    // The parameters that are currently unknown.
+    _unknownRouteParams = [],
+
     // Check if this is an `app/` page.
     _isAppDir: isAppDir = false,
 
@@ -101,6 +104,8 @@ async function exportPageImpl(
   } = pathMap
 
   try {
+    const unknownRouteParams: ReadonlySet<string> = new Set(_unknownRouteParams)
+
     let query = { ...originalQuery }
     const pathname = normalizeAppPath(page)
     const isDynamic = isDynamicRoute(page)
@@ -279,6 +284,7 @@ async function exportPageImpl(
         path,
         pathname,
         query,
+        unknownRouteParams,
         renderOpts,
         htmlFilepath,
         debugOutput,
