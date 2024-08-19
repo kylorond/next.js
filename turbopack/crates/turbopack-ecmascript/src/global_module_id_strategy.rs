@@ -1,17 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use turbo_tasks::{
     graph::{AdjacencyMap, GraphTraversal},
-    ValueToString, Vc,
+    RcStr, TryJoinIterExt, ValueToString, Vc,
 };
 use turbo_tasks_hash::hash_xxh3_hash64;
 use turbopack_core::{
     chunk::ModuleId,
-    ident::AssetIdent,
     module::{Module, Modules},
-    reference::primary_referenced_modules,
+    reference::ModuleReference,
 };
+
+use crate::references::esm::EsmAsyncAssetReference;
 
 #[turbo_tasks::value]
 pub struct PreprocessedChildrenIdents {
@@ -21,12 +22,89 @@ pub struct PreprocessedChildrenIdents {
     modules_idents: HashMap<RcStr, u64>,
 }
 
+#[derive(Clone, Hash)]
+#[turbo_tasks::value(shared)]
+pub enum ReferencedModule {
+    Module(Vc<Box<dyn Module>>),
+    AsyncLoaderModule(Vc<Box<dyn Module>>),
+}
+
+impl ReferencedModule {
+    fn module(&self) -> Vc<Box<dyn Module>> {
+        match *self {
+            ReferencedModule::Module(module) => module,
+            ReferencedModule::AsyncLoaderModule(module) => module,
+        }
+    }
+}
+
+#[turbo_tasks::value(transparent)]
+pub struct ReferencedModules(Vec<Vc<ReferencedModule>>);
+
+#[turbo_tasks::function]
+async fn referenced_modules(module: Vc<Box<dyn Module>>) -> Result<Vc<ReferencedModules>> {
+    let references = module.references().await?;
+
+    let mut set = HashSet::new();
+    let modules_and_async_loaders: Vec<(Vec<Vc<Box<dyn Module>>>, Option<Vc<Box<dyn Module>>>)> =
+        references
+            .iter()
+            .map(|reference| async move {
+                let mut async_loader = None;
+                if let Some(_) =
+                    Vc::try_resolve_downcast_type::<EsmAsyncAssetReference>(*reference).await?
+                {
+                    async_loader = Some(
+                        reference
+                            .resolve_reference()
+                            .resolve()
+                            .await?
+                            .first_module()
+                            .await?
+                            .context("No module found")?,
+                    );
+                }
+
+                let modules = reference
+                    .resolve_reference()
+                    .resolve()
+                    .await?
+                    .primary_modules()
+                    .await?
+                    .clone_value();
+
+                Ok((modules, async_loader))
+            })
+            .try_join()
+            .await?;
+
+    let mut modules = Vec::new();
+
+    for (module_list, async_loader) in modules_and_async_loaders {
+        for module in module_list {
+            if set.insert(module) {
+                modules.push(ReferencedModule::Module(module).cell());
+            }
+        }
+        if let Some(async_loader_module) = async_loader {
+            if set.insert(async_loader_module) {
+                modules.push(ReferencedModule::AsyncLoaderModule(async_loader_module).cell());
+            }
+        }
+    }
+
+    Ok(Vc::cell(modules))
+}
+
 pub async fn get_children_modules(
-    parent: Vc<Box<dyn Module>>,
-) -> Result<impl Iterator<Item = Vc<Box<dyn Module>>> + Send> {
-    let mut primary_modules = primary_referenced_modules(parent).await?.clone_value();
-    primary_modules.extend(parent.additional_layers_modules().await?.clone_value());
-    Ok(primary_modules.into_iter())
+    parent: Vc<ReferencedModule>,
+) -> Result<impl Iterator<Item = Vc<ReferencedModule>> + Send> {
+    let parent_module = parent.await?.module();
+    let mut modules = referenced_modules(parent_module).await?.clone_value();
+    for module in parent_module.additional_layers_modules().await? {
+        modules.push(ReferencedModule::Module(*module).cell());
+    }
+    Ok(modules.into_iter())
 }
 
 // NOTE(LichuAcu) Called on endpoint.root_modules(). It would probably be better if this was called
@@ -39,7 +117,14 @@ pub async fn children_modules_idents(
 ) -> Result<Vc<PreprocessedChildrenIdents>> {
     let children_modules_iter = AdjacencyMap::new()
         .skip_duplicates()
-        .visit(root_modules.await?.iter().copied(), get_children_modules)
+        .visit(
+            root_modules
+                .await?
+                .iter()
+                .map(|module| ReferencedModule::Module(*module).cell())
+                .collect::<Vec<_>>(),
+            get_children_modules,
+        )
         .await
         .completed()?
         .into_inner()
@@ -47,11 +132,23 @@ pub async fn children_modules_idents(
 
     // module_id -> full hash
     let mut modules_idents = HashMap::new();
-
-    for module in children_modules_iter {
-        let module_ident = module.ident();
-        let hash = hash_xxh3_hash64(module_ident.to_string().await?);
-        modules_idents.insert(module_ident.await?.clone_value(), hash);
+    for child_module in children_modules_iter {
+        match *child_module.await? {
+            ReferencedModule::Module(module) => {
+                let module_ident = module.ident();
+                let ident_str = module_ident.to_string().await?.clone_value();
+                let hash = hash_xxh3_hash64(&ident_str);
+                modules_idents.insert(ident_str, hash);
+            }
+            ReferencedModule::AsyncLoaderModule(async_loader_module) => {
+                let async_loader_ident = async_loader_module
+                    .ident()
+                    .with_modifier(Vc::cell("async loader".into()));
+                let ident_str = async_loader_ident.to_string().await?.clone_value();
+                let hash = hash_xxh3_hash64(&ident_str);
+                modules_idents.insert(ident_str, hash);
+            }
+        }
     }
 
     Ok(PreprocessedChildrenIdents { modules_idents }.cell())
